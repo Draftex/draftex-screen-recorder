@@ -36,18 +36,20 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
-ShowLanguageDialog=auto
+; výber jazyka vždy; zvolený jazyk sa zapíše do registra a aplikácia ho prevezme
+ShowLanguageDialog=yes
 ; Podpis inštalátora (Tools > Configure Sign Tools v Inno Setup, názov "draftex"):
 ;SignTool=draftex $f
 ;SignedUninstaller=yes
 
 [Languages]
-Name: "slovak";  MessagesFile: "compiler:Languages\Slovak.isl"
-Name: "english"; MessagesFile: "compiler:Default.isl"
+; názvy "sk" / "en" = hodnoty, ktoré aplikácia číta z registra (language)
+Name: "sk"; MessagesFile: "compiler:Languages\Slovak.isl"
+Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-slovak.Autostart=Spúšťať pri prihlásení do Windows (na pozadí, ikona v lište)
-english.Autostart=Start with Windows (in background, tray icon)
+sk.Autostart=Spúšťať pri prihlásení do Windows (na pozadí, ikona v lište)
+en.Autostart=Start with Windows (in background, tray icon)
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -63,8 +65,8 @@ Name: "{autodesktop}\{#MyAppName}";  Filename: "{app}\{#MyAppExeName}"; Tasks: d
 [Registry]
 ; autoštart do lišty
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "DraftexScreenRecorder"; ValueData: """{app}\{#MyAppExeName}"" --tray"; Flags: uninsdeletevalue; Tasks: autostart
-; nastavenia aplikácie (QSettings) – zmazať pri odinštalovaní
-Root: HKCU; Subkey: "Software\Draftex\ScreenRecorder"; Flags: uninsdeletekey dontcreatekey
+; nastavenia aplikácie (QSettings) – jazyk zvolený v inštalátore; celý kľúč sa zmaže pri odinštalovaní
+Root: HKCU; Subkey: "Software\Draftex\ScreenRecorder"; ValueType: string; ValueName: "language"; ValueData: "{language}"; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

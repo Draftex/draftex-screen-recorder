@@ -42,6 +42,13 @@ Zmeň číslo na troch miestach:
 2. `version_info.txt` → `filevers`, `prodvers`, `FileVersion`, `ProductVersion`
 3. `installer.iss` → `#define MyAppVersion "1.0.0"`
 
+## Jazyk aplikácie
+
+Zdrojový jazyk je slovenčina, angličtina je slovník `TR_EN` v `screen_recorder.py`
+(funkcia `tr()`). Poradie určenia jazyka: hodnota `language` v registri (zapíše ju
+inštalátor alebo prepínač „Jazyk" v okne) → jazyk Windows (slovenčina → `sk`, inak `en`).
+Pri pridaní nového textu do UI ho obal do `tr("…")` a doplň preklad do `TR_EN`.
+
 ## Podpísanie (EV certifikát)
 
 - EXE: pred spustením nastav `set SIGN_CMD=signtool sign /tr http://ts.ssl.com /td sha256 /fd sha256 /a`
@@ -63,6 +70,8 @@ nemá libx264, ostanú len hardvérové kodéry.
 
 - inštaluje bez admin práv do `%LocalAppData%\Programs\Draftex\Screen Recorder`
   (dialóg ponúkne aj inštaláciu pre všetkých používateľov do Program Files)
+- výber jazyka (slovenčina / angličtina) sa zobrazí vždy; zvolený jazyk sa zapíše do
+  `HKCU\Software\Draftex\ScreenRecorder\language` (`sk` / `en`) a aplikácia ho prevezme
 - voliteľná úloha „Spúšťať pri prihlásení" → `DraftexScreenRecorder.exe --tray`
   (beží len v lište, nahrávanie cez Ctrl+Shift+F9)
 - pri odinštalovaní zmaže aj nastavenia (`HKCU\Software\Draftex\ScreenRecorder`)

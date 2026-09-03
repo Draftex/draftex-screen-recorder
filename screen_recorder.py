@@ -48,6 +48,8 @@ from pathlib import Path
 from PyQt6.QtCore import (
     QAbstractNativeEventFilter,
     QDir,
+    QLibraryInfo,
+    QLocale,
     QLockFile,
     QObject,
     QPoint,
@@ -57,6 +59,7 @@ from PyQt6.QtCore import (
     QSettings,
     Qt,
     QTimer,
+    QTranslator,
     QUrl,
     pyqtSignal,
 )
@@ -108,10 +111,13 @@ FPS_OPTIONS = [15, 24, 30, 60]
 
 # kvalita -> (CRF pre libx264, bity na pixel a snímku pre HW kodéry)
 QUALITY = {
-    "Vysoká": (18, 0.12),
-    "Stredná": (23, 0.08),
-    "Nízka": (28, 0.05),
+    "high": (18, 0.12),
+    "medium": (23, 0.08),
+    "low": (28, 0.05),
 }
+QUALITY_LABELS = {"high": "Vysoká", "medium": "Stredná", "low": "Nízka"}
+# staré hodnoty v nastaveniach (verzia 1.0.0 ukladala slovenský popisok)
+QUALITY_LEGACY = {"Vysoká": "high", "Stredná": "medium", "Nízka": "low"}
 
 ENCODER_LABELS = [
     ("libx264", "H.264 – procesor (libx264)"),
@@ -119,6 +125,109 @@ ENCODER_LABELS = [
     ("h264_amf", "H.264 – AMD (AMF)"),
     ("h264_qsv", "H.264 – Intel (QSV)"),
 ]
+
+
+# --------------------------------------------------------------------------- #
+#  Jazyk – slovenčina je zdroj, angličtina cez slovník
+# --------------------------------------------------------------------------- #
+LANGUAGES = [("sk", "Slovenčina"), ("en", "English")]
+_LANG = "sk"
+
+TR_EN: dict[str, str] = {
+    "Vysoká": "High",
+    "Stredná": "Medium",
+    "Nízka": "Low",
+    "H.264 – procesor (libx264)": "H.264 – CPU (libx264)",
+    "Ťahaním myši vyber oblasť nahrávania   •   Esc = zrušiť": "Drag with the mouse to select the recording area   •   Esc = cancel",
+    "cesta k ffmpeg.exe (hľadá sa automaticky v PATH a vedľa skriptu)": "path to ffmpeg.exe (searched automatically in PATH and next to the app)",
+    "Prehľadávať…": "Browse…",
+    "Obraz": "Video",
+    "Celá obrazovka": "Full screen",
+    "Všetky monitory (celá pracovná plocha)": "All monitors (entire desktop)",
+    " – hlavný": " – primary",
+    "Vybraná oblasť": "Selected area",
+    "Vybrať oblasť…": "Select area…",
+    "žiadna oblasť nie je vybraná": "no area selected",
+    "Zaznamenať kurzor myši": "Capture mouse cursor",
+    "Snímková frekvencia:": "Frame rate:",
+    "Kodér:": "Encoder:",
+    "Kvalita:": "Quality:",
+    "Zvuk": "Audio",
+    "Nahrávať zvuk zo zariadenia:": "Record audio from device:",
+    "Obnoviť": "Refresh",
+    "Zmiešať s druhým zariadením:": "Mix with a second device:",
+    "Zvuk systému („čo počujem“) sa nahrá cez zariadenie <b>Stereo Mix</b> "
+    "(zapni ho v Nastavenia › Zvuk › Nahrávanie) alebo cez virtuálny kábel (VB-Cable). "
+    "Mikrofón + systém zmiešaš zapnutím druhého zariadenia.":
+        "System audio (“what you hear”) is recorded through the <b>Stereo Mix</b> device "
+        "(enable it in Settings › Sound › Recording) or through a virtual cable (VB-Cable). "
+        "Mix microphone + system audio by enabling the second device.",
+    "Výstup": "Output",
+    "Priečinok:": "Folder:",
+    "Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište alebo {hotkey})":
+        "Hide this window while recording (stop via the tray icon or {hotkey})",
+    "Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište)":
+        "Hide this window while recording (stop via the tray icon)",
+    "●  Nahrávať": "●  Record",
+    "■  Zastaviť": "■  Stop",
+    "Otvoriť priečinok": "Open folder",
+    "Pripravené.": "Ready.",
+    "Zobraziť výstup FFmpeg": "Show FFmpeg output",
+    "Jazyk:": "Language:",
+    "Zmena jazyka sa prejaví po reštarte aplikácie. Reštartovať teraz?":
+        "The language change takes effect after restarting the application. Restart now?",
+    "Nahrávať": "Record",
+    "Zastaviť nahrávanie": "Stop recording",
+    "Zobraziť okno": "Show window",
+    "Ukončiť": "Quit",
+    "FFmpeg sa nenašiel – nainštaluj ho (winget install Gyan.FFmpeg) alebo zadaj cestu.":
+        "FFmpeg not found – install it (winget install Gyan.FFmpeg) or enter its path.",
+    "(žiadne zvukové zariadenie sa nenašlo)": "(no audio device found)",
+    "Vyber ffmpeg": "Select ffmpeg",
+    "Všetky súbory (*)": "All files (*)",
+    "Priečinok pre nahrávky": "Folder for recordings",
+    "Najprv vyber oblasť nahrávania.": "Select the recording area first.",
+    "FFmpeg sa nenašiel. Nainštaluj ho alebo zadaj cestu k ffmpeg.exe.":
+        "FFmpeg not found. Install it or enter the path to ffmpeg.exe.",
+    "Nie je vybrané žiadne zvukové zariadenie. Vypni zvuk alebo obnov zoznam zariadení.":
+        "No audio device selected. Disable audio or refresh the device list.",
+    "Priečinok sa nedá vytvoriť:\n{exc}": "The folder cannot be created:\n{exc}",
+    "Spúšťa sa…": "Starting…",
+    "Ukončuje sa nahrávanie…": "Stopping recording…",
+    "Nahrávanie zrušené.": "Recording cancelled.",
+    "FFmpeg neskončil včas – vynútené ukončenie.": "FFmpeg did not finish in time – forced termination.",
+    "Nahrávanie beží. Zastavíš ho cez {hotkey} alebo ikonu v lište.":
+        "Recording is running. Stop it with {hotkey} or the tray icon.",
+    "FFmpeg sa nepodarilo spustiť: ": "FFmpeg failed to start: ",
+    "Uložené: {name} ({size})": "Saved: {name} ({size})",
+    "Nahrávka uložená:\n{path}": "Recording saved:\n{path}",
+    "FFmpeg skončil s chybou (kód {code}).": "FFmpeg exited with an error (code {code}).",
+    "Nahrávanie zlyhalo. Posledné riadky výstupu FFmpeg:\n\n": "Recording failed. Last lines of FFmpeg output:\n\n",
+    "● Nahráva sa": "● Recording",
+    "Nahrávanie stále beží. Zastaviť ho a ukončiť aplikáciu?": "Recording is still running. Stop it and quit the application?",
+    "Aplikácia už beží – nájdeš ju ako ikonu v lište vedľa hodín.": "The application is already running – find its icon in the tray next to the clock.",
+    "Beží na pozadí. Nahrávanie: {hotkey} alebo dvojklik na ikonu.": "Running in the background. Record: {hotkey} or double-click the icon.",
+}
+
+
+def tr(text: str) -> str:
+    """Preklad používateľského textu podľa aktuálneho jazyka (zdroj = slovenčina)."""
+    if _LANG == "en":
+        return TR_EN.get(text, text)
+    return text
+
+
+def set_language(lang: str) -> None:
+    global _LANG
+    _LANG = lang if lang in dict(LANGUAGES) else "sk"
+
+
+def detect_language(settings: QSettings) -> str:
+    """Jazyk z nastavení (zapíše ho aj inštalátor), inak podľa jazyka Windows."""
+    value = str(settings.value("language", "", str) or "").strip().lower()
+    if value in dict(LANGUAGES):
+        return value
+    return "sk" if QLocale.system().name().lower().startswith("sk") else "en"
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +407,7 @@ def build_ffmpeg_args(
         args += ["-map", "[a]"]
 
     # --- kodér
-    crf, bpp = QUALITY.get(quality, QUALITY["Stredná"])
+    crf, bpp = QUALITY.get(quality, QUALITY["medium"])
     if encoder == "libx264":
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf)]
     else:
@@ -491,7 +600,7 @@ class RegionOverlay(QWidget):
         else:
             self._draw_label(
                 p,
-                "Ťahaním myši vyber oblasť nahrávania   •   Esc = zrušiť",
+                tr("Ťahaním myši vyber oblasť nahrávania   •   Esc = zrušiť"),
                 self.rect().center(),
                 centered=True,
             )
@@ -846,6 +955,7 @@ class RecorderWindow(QWidget):
         self.process: QProcess | None = None
         self.started_at: datetime | None = None
         self._hidden_for_recording = False
+        self.restart_requested = False
         self._selector: RegionSelector | None = None
         self._frames: list[RegionFrame] = []
         self._picking_region = False
@@ -873,35 +983,35 @@ class RecorderWindow(QWidget):
         ff_box = QGroupBox("FFmpeg")
         ff_row = QHBoxLayout(ff_box)
         self.ffmpeg_edit = QLineEdit()
-        self.ffmpeg_edit.setPlaceholderText("cesta k ffmpeg.exe (hľadá sa automaticky v PATH a vedľa skriptu)")
+        self.ffmpeg_edit.setPlaceholderText(tr("cesta k ffmpeg.exe (hľadá sa automaticky v PATH a vedľa skriptu)"))
         self.ffmpeg_edit.editingFinished.connect(self._detect_ffmpeg)
-        ff_browse = QPushButton("Prehľadávať…")
+        ff_browse = QPushButton(tr("Prehľadávať…"))
         ff_browse.clicked.connect(self._browse_ffmpeg)
         ff_row.addWidget(self.ffmpeg_edit, 1)
         ff_row.addWidget(ff_browse)
         root.addWidget(ff_box)
 
         # ---- Obraz
-        video_box = QGroupBox("Obraz")
+        video_box = QGroupBox(tr("Obraz"))
         video = QVBoxLayout(video_box)
 
         row_full = QHBoxLayout()
-        self.radio_full = QRadioButton("Celá obrazovka")
+        self.radio_full = QRadioButton(tr("Celá obrazovka"))
         self.radio_full.setChecked(True)
         self.monitor_combo = QComboBox()
-        self.monitor_combo.addItem("Všetky monitory (celá pracovná plocha)", None)
+        self.monitor_combo.addItem(tr("Všetky monitory (celá pracovná plocha)"), None)
         for i, m in enumerate(self.monitors):
-            suffix = " – hlavný" if m.primary else ""
+            suffix = tr(" – hlavný") if m.primary else ""
             self.monitor_combo.addItem(f"Monitor {i + 1}: {m.width}×{m.height}{suffix}", i)
         row_full.addWidget(self.radio_full)
         row_full.addWidget(self.monitor_combo, 1)
         video.addLayout(row_full)
 
         row_region = QHBoxLayout()
-        self.radio_region = QRadioButton("Vybraná oblasť")
-        self.region_btn = QPushButton("Vybrať oblasť…")
+        self.radio_region = QRadioButton(tr("Vybraná oblasť"))
+        self.region_btn = QPushButton(tr("Vybrať oblasť…"))
         self.region_btn.clicked.connect(self._pick_region)
-        self.region_label = QLabel("žiadna oblasť nie je vybraná")
+        self.region_label = QLabel(tr("žiadna oblasť nie je vybraná"))
         self.region_label.setStyleSheet("color: #777;")
         row_region.addWidget(self.radio_region)
         row_region.addWidget(self.region_btn)
@@ -919,27 +1029,27 @@ class RecorderWindow(QWidget):
         self.fps_combo.setCurrentIndex(FPS_OPTIONS.index(30))
         self.encoder_combo = QComboBox()
         self.quality_combo = QComboBox()
-        for q in QUALITY:
-            self.quality_combo.addItem(q)
-        self.quality_combo.setCurrentText("Stredná")
-        self.cursor_check = QCheckBox("Zaznamenať kurzor myši")
+        for key in QUALITY:
+            self.quality_combo.addItem(tr(QUALITY_LABELS[key]), key)
+        self.quality_combo.setCurrentIndex(self.quality_combo.findData("medium"))
+        self.cursor_check = QCheckBox(tr("Zaznamenať kurzor myši"))
         self.cursor_check.setChecked(True)
-        form.addRow("Snímková frekvencia:", self.fps_combo)
-        form.addRow("Kodér:", self.encoder_combo)
-        form.addRow("Kvalita:", self.quality_combo)
+        form.addRow(tr("Snímková frekvencia:"), self.fps_combo)
+        form.addRow(tr("Kodér:"), self.encoder_combo)
+        form.addRow(tr("Kvalita:"), self.quality_combo)
         form.addRow("", self.cursor_check)
         video.addLayout(form)
         root.addWidget(video_box)
 
         # ---- Zvuk
-        audio_box = QGroupBox("Zvuk")
+        audio_box = QGroupBox(tr("Zvuk"))
         audio = QVBoxLayout(audio_box)
 
         row_a1 = QHBoxLayout()
-        self.audio_check = QCheckBox("Nahrávať zvuk zo zariadenia:")
+        self.audio_check = QCheckBox(tr("Nahrávať zvuk zo zariadenia:"))
         self.audio_check.setChecked(True)
         self.audio_combo = QComboBox()
-        self.audio_refresh = QPushButton("Obnoviť")
+        self.audio_refresh = QPushButton(tr("Obnoviť"))
         self.audio_refresh.clicked.connect(self._refresh_audio_devices)
         row_a1.addWidget(self.audio_check)
         row_a1.addWidget(self.audio_combo, 1)
@@ -947,7 +1057,7 @@ class RecorderWindow(QWidget):
         audio.addLayout(row_a1)
 
         row_a2 = QHBoxLayout()
-        self.audio2_check = QCheckBox("Zmiešať s druhým zariadením:")
+        self.audio2_check = QCheckBox(tr("Zmiešať s druhým zariadením:"))
         self.audio2_combo = QComboBox()
         self.audio2_combo.setEnabled(False)
         self.audio2_check.toggled.connect(self.audio2_combo.setEnabled)
@@ -955,35 +1065,36 @@ class RecorderWindow(QWidget):
         row_a2.addWidget(self.audio2_combo, 1)
         audio.addLayout(row_a2)
 
-        hint = QLabel(
+        hint = QLabel(tr(
             "Zvuk systému („čo počujem“) sa nahrá cez zariadenie <b>Stereo Mix</b> "
             "(zapni ho v Nastavenia › Zvuk › Nahrávanie) alebo cez virtuálny kábel (VB-Cable). "
             "Mikrofón + systém zmiešaš zapnutím druhého zariadenia."
-        )
+        ))
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #777;")
         audio.addWidget(hint)
         root.addWidget(audio_box)
 
         # ---- Výstup
-        out_box = QGroupBox("Výstup")
+        out_box = QGroupBox(tr("Výstup"))
         out = QVBoxLayout(out_box)
         row_o = QHBoxLayout()
         self.out_edit = QLineEdit()
-        out_browse = QPushButton("Prehľadávať…")
+        out_browse = QPushButton(tr("Prehľadávať…"))
         out_browse.clicked.connect(self._browse_output)
-        row_o.addWidget(QLabel("Priečinok:"))
+        row_o.addWidget(QLabel(tr("Priečinok:")))
         row_o.addWidget(self.out_edit, 1)
         row_o.addWidget(out_browse)
         out.addLayout(row_o)
-        self.hide_check = QCheckBox("Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište alebo " + HOTKEY_LABEL + ")")
+        self.hide_check = QCheckBox(
+            tr("Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište alebo {hotkey})").format(hotkey=HOTKEY_LABEL))
         self.hide_check.setChecked(True)
         out.addWidget(self.hide_check)
         root.addWidget(out_box)
 
         # ---- Ovládanie
         ctl = QHBoxLayout()
-        self.record_btn = QPushButton("●  Nahrávať")
+        self.record_btn = QPushButton(tr("●  Nahrávať"))
         self.record_btn.setMinimumHeight(44)
         self.record_btn.setStyleSheet(
             "QPushButton { font-size: 15px; font-weight: 600; padding: 6px 22px;"
@@ -993,18 +1104,26 @@ class RecorderWindow(QWidget):
             "QPushButton:disabled { color: #F5F5F5; background-color: #EF9A9A; border-color: #E57373; }"
         )
         self.record_btn.clicked.connect(self.toggle_recording)
-        self.open_btn = QPushButton("Otvoriť priečinok")
+        self.open_btn = QPushButton(tr("Otvoriť priečinok"))
         self.open_btn.clicked.connect(self._open_output_folder)
-        self.status_label = QLabel("Pripravené.")
+        self.status_label = QLabel(tr("Pripravené."))
         ctl.addWidget(self.record_btn)
         ctl.addWidget(self.open_btn)
         ctl.addWidget(self.status_label, 1)
         root.addLayout(ctl)
 
-        # ---- Log
-        self.log_check = QCheckBox("Zobraziť výstup FFmpeg")
+        # ---- Log + jazyk
+        bottom = QHBoxLayout()
+        self.log_check = QCheckBox(tr("Zobraziť výstup FFmpeg"))
         self.log_check.toggled.connect(self._toggle_log)
-        root.addWidget(self.log_check)
+        self.language_combo = QComboBox()
+        for code, name in LANGUAGES:
+            self.language_combo.addItem(name, code)
+        self.language_combo.currentIndexChanged.connect(self._language_changed)
+        bottom.addWidget(self.log_check, 1)
+        bottom.addWidget(QLabel(tr("Jazyk:")))
+        bottom.addWidget(self.language_combo)
+        root.addLayout(bottom)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
@@ -1018,11 +1137,11 @@ class RecorderWindow(QWidget):
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(make_icon(False), self)
         menu = QMenu()
-        self.tray_toggle_action = QAction("Nahrávať", self)
+        self.tray_toggle_action = QAction(tr("Nahrávať"), self)
         self.tray_toggle_action.triggered.connect(self.toggle_recording)
-        show_action = QAction("Zobraziť okno", self)
+        show_action = QAction(tr("Zobraziť okno"), self)
         show_action.triggered.connect(self._show_window)
-        quit_action = QAction("Ukončiť", self)
+        quit_action = QAction(tr("Ukončiť"), self)
         quit_action.triggered.connect(self._quit)
         menu.addAction(self.tray_toggle_action)
         menu.addAction(show_action)
@@ -1043,7 +1162,16 @@ class RecorderWindow(QWidget):
         fps = s.value("fps", 30, int)
         if fps in FPS_OPTIONS:
             self.fps_combo.setCurrentIndex(FPS_OPTIONS.index(fps))
-        self.quality_combo.setCurrentText(s.value("quality", "Stredná", str))
+        quality = s.value("quality", "medium", str)
+        quality = QUALITY_LEGACY.get(quality, quality)
+        idx = self.quality_combo.findData(quality)
+        if idx >= 0:
+            self.quality_combo.setCurrentIndex(idx)
+        idx = self.language_combo.findData(_LANG)
+        if idx >= 0:
+            self.language_combo.blockSignals(True)
+            self.language_combo.setCurrentIndex(idx)
+            self.language_combo.blockSignals(False)
         self.cursor_check.setChecked(s.value("cursor", True, bool))
         self.hide_check.setChecked(s.value("hide_window", True, bool))
         self.audio_check.setChecked(s.value("audio", True, bool))
@@ -1060,7 +1188,7 @@ class RecorderWindow(QWidget):
         s.setValue("output_dir", self.out_edit.text().strip())
         s.setValue("fps", self.fps_combo.currentData())
         s.setValue("encoder", self.encoder_combo.currentData())
-        s.setValue("quality", self.quality_combo.currentText())
+        s.setValue("quality", self.quality_combo.currentData())
         s.setValue("cursor", self.cursor_check.isChecked())
         s.setValue("hide_window", self.hide_check.isChecked())
         s.setValue("audio", self.audio_check.isChecked())
@@ -1075,21 +1203,21 @@ class RecorderWindow(QWidget):
         path = find_ffmpeg(self.ffmpeg_edit.text().strip())
         if not path:
             self.ffmpeg_path = ""
-            self.status_label.setText("FFmpeg sa nenašiel – nainštaluj ho (winget install Gyan.FFmpeg) alebo zadaj cestu.")
+            self.status_label.setText(tr("FFmpeg sa nenašiel – nainštaluj ho (winget install Gyan.FFmpeg) alebo zadaj cestu."))
             self.status_label.setStyleSheet("color: #C62828;")
             self.encoder_combo.clear()
-            self.encoder_combo.addItem(ENCODER_LABELS[0][1], ENCODER_LABELS[0][0])
+            self.encoder_combo.addItem(tr(ENCODER_LABELS[0][1]), ENCODER_LABELS[0][0])
             return
         self.ffmpeg_path = path
         if not self.ffmpeg_edit.text().strip():
             self.ffmpeg_edit.setPlaceholderText(path)
         self.status_label.setStyleSheet("")
-        self.status_label.setText("Pripravené.")
+        self.status_label.setText(tr("Pripravené."))
 
         wanted = self.settings.value("encoder", "libx264", str)
         self.encoder_combo.clear()
         for name, label in list_video_encoders(path):
-            self.encoder_combo.addItem(label, name)
+            self.encoder_combo.addItem(tr(label), name)
         idx = self.encoder_combo.findData(wanted)
         self.encoder_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
@@ -1109,8 +1237,8 @@ class RecorderWindow(QWidget):
             if idx >= 0:
                 combo.setCurrentIndex(idx)
         if not self.audio_devices:
-            self.audio_combo.addItem("(žiadne zvukové zariadenie sa nenašlo)", None)
-            self.audio2_combo.addItem("(žiadne zvukové zariadenie sa nenašlo)", None)
+            self.audio_combo.addItem(tr("(žiadne zvukové zariadenie sa nenašlo)"), None)
+            self.audio2_combo.addItem(tr("(žiadne zvukové zariadenie sa nenašlo)"), None)
 
     # ------------------------------------------------------------- pomocné
     def _sync_mode_widgets(self) -> None:
@@ -1119,6 +1247,19 @@ class RecorderWindow(QWidget):
         self.region_btn.setEnabled(not full)
         self._update_region_frame()
 
+    def _language_changed(self, _index: int) -> None:
+        lang = str(self.language_combo.currentData() or "sk")
+        if lang == _LANG:
+            return
+        self.settings.setValue("language", lang)
+        answer = QMessageBox.question(
+            self, APP_NAME, tr("Zmena jazyka sa prejaví po reštarte aplikácie. Reštartovať teraz?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.restart_requested = True
+            self._quit()
+
     def _toggle_log(self, on: bool) -> None:
         self.log.setVisible(on)
         if not on:
@@ -1126,13 +1267,13 @@ class RecorderWindow(QWidget):
 
     def _browse_ffmpeg(self) -> None:
         flt = "ffmpeg.exe (ffmpeg.exe)" if IS_WINDOWS else "ffmpeg (ffmpeg)"
-        path, _ = QFileDialog.getOpenFileName(self, "Vyber ffmpeg", "", flt + ";;Všetky súbory (*)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Vyber ffmpeg"), "", flt + ";;" + tr("Všetky súbory (*)"))
         if path:
             self.ffmpeg_edit.setText(path)
             self._detect_ffmpeg()
 
     def _browse_output(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Priečinok pre nahrávky", self.out_edit.text())
+        path = QFileDialog.getExistingDirectory(self, tr("Priečinok pre nahrávky"), self.out_edit.text())
         if path:
             self.out_edit.setText(path)
 
@@ -1165,8 +1306,8 @@ class RecorderWindow(QWidget):
         QApplication.quit()
 
     def _set_recording_ui(self, recording: bool) -> None:
-        self.record_btn.setText("■  Zastaviť" if recording else "●  Nahrávať")
-        self.tray_toggle_action.setText("Zastaviť nahrávanie" if recording else "Nahrávať")
+        self.record_btn.setText(tr("■  Zastaviť") if recording else tr("●  Nahrávať"))
+        self.tray_toggle_action.setText(tr("Zastaviť nahrávanie") if recording else tr("Nahrávať"))
         icon = make_icon(recording)
         self.tray.setIcon(icon)
         self.setWindowIcon(icon)
@@ -1177,6 +1318,7 @@ class RecorderWindow(QWidget):
             self.fps_combo, self.encoder_combo, self.quality_combo, self.cursor_check,
             self.audio_check, self.audio_combo, self.audio_refresh, self.audio2_check,
             self.audio2_combo, self.out_edit, self.hide_check, self.ffmpeg_edit,
+            self.language_combo,
         ):
             w.setEnabled(not recording)
         if not recording:
@@ -1212,7 +1354,7 @@ class RecorderWindow(QWidget):
         for f in self._frames:
             f.set_region(self.region)
 
-    # ---- rám vybranej oblasti (viditeľný stále, kým je zvolený režim "Vybraná oblasť")
+    # ---- rám vybranej oblasti (viditeľný stále, kým je zvolený režim „Vybraná oblasť“)
     def _update_region_frame(self) -> None:
         show = self.radio_region.isChecked() and self.region is not None and not self._picking_region
         if not show:
@@ -1263,7 +1405,7 @@ class RecorderWindow(QWidget):
         """Vráti (oblasť pre gdigrab alebo None = celá plocha, odhad rozmerov)."""
         if self.radio_region.isChecked():
             if self.region is None:
-                raise ValueError("Najprv vyber oblasť nahrávania.")
+                raise ValueError(tr("Najprv vyber oblasť nahrávania."))
             return self.region, (self.region.width(), self.region.height())
         idx = self.monitor_combo.currentData()
         if idx is None:
@@ -1281,7 +1423,7 @@ class RecorderWindow(QWidget):
         if self.process is not None:
             return
         if not self.ffmpeg_path:
-            QMessageBox.warning(self, APP_NAME, "FFmpeg sa nenašiel. Nainštaluj ho alebo zadaj cestu k ffmpeg.exe.")
+            QMessageBox.warning(self, APP_NAME, tr("FFmpeg sa nenašiel. Nainštaluj ho alebo zadaj cestu k ffmpeg.exe."))
             return
         try:
             region, est = self._capture_region()
@@ -1291,14 +1433,14 @@ class RecorderWindow(QWidget):
 
         audio = self._selected_audio()
         if self.audio_check.isChecked() and not audio:
-            QMessageBox.warning(self, APP_NAME, "Nie je vybrané žiadne zvukové zariadenie. Vypni zvuk alebo obnov zoznam zariadení.")
+            QMessageBox.warning(self, APP_NAME, tr("Nie je vybrané žiadne zvukové zariadenie. Vypni zvuk alebo obnov zoznam zariadení."))
             return
 
         out_dir = Path(self.out_edit.text().strip() or Path.home())
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, APP_NAME, f"Priečinok sa nedá vytvoriť:\n{exc}")
+            QMessageBox.warning(self, APP_NAME, tr("Priečinok sa nedá vytvoriť:\n{exc}").format(exc=exc))
             return
         self.output_path = str(out_dir / f"zaznam_{datetime.now():%Y-%m-%d_%H-%M-%S}.mp4")
 
@@ -1307,7 +1449,7 @@ class RecorderWindow(QWidget):
             region=region,
             cursor=self.cursor_check.isChecked(),
             encoder=str(self.encoder_combo.currentData() or "libx264"),
-            quality=self.quality_combo.currentText(),
+            quality=str(self.quality_combo.currentData()),
             audio=audio,
             output=self.output_path,
             est_size=est,
@@ -1325,7 +1467,7 @@ class RecorderWindow(QWidget):
         self._stopping = False
 
         self._set_recording_ui(True)
-        self.status_label.setText("Spúšťa sa…")
+        self.status_label.setText(tr("Spúšťa sa…"))
 
         if self.hide_check.isChecked() and self.tray.isVisible():
             self._hidden_for_recording = True
@@ -1345,7 +1487,7 @@ class RecorderWindow(QWidget):
         if self.process is None or self._stopping:
             return
         self._stopping = True
-        self.status_label.setText("Ukončuje sa nahrávanie…")
+        self.status_label.setText(tr("Ukončuje sa nahrávanie…"))
         if self.process.state() == QProcess.ProcessState.Running:
             # 'q' na stdin = korektné ukončenie, MP4 sa riadne uzavrie
             self.process.write(b"q")
@@ -1359,14 +1501,14 @@ class RecorderWindow(QWidget):
             self._stopping = False
             self._set_recording_ui(False)
             self.status_label.setStyleSheet("")
-            self.status_label.setText("Nahrávanie zrušené.")
+            self.status_label.setText(tr("Nahrávanie zrušené."))
             if self._hidden_for_recording:
                 self._hidden_for_recording = False
                 self._show_window()
 
     def _force_stop(self) -> None:
         if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
-            self._append_log("FFmpeg neskončil včas – vynútené ukončenie.")
+            self._append_log(tr("FFmpeg neskončil včas – vynútené ukončenie."))
             self.process.kill()
 
     # ------------------------------------------------------- proces (sloty)
@@ -1375,7 +1517,7 @@ class RecorderWindow(QWidget):
         self.tick.start()
         self._update_status()
         if self.tray.isVisible():
-            self.tray.showMessage(APP_NAME, f"Nahrávanie beží. Zastavíš ho cez {HOTKEY_LABEL} alebo ikonu v lište.",
+            self.tray.showMessage(APP_NAME, tr("Nahrávanie beží. Zastavíš ho cez {hotkey} alebo ikonu v lište.").format(hotkey=HOTKEY_LABEL),
                                   QSystemTrayIcon.MessageIcon.Information, 3000)
 
     def _on_process_output(self) -> None:
@@ -1386,7 +1528,7 @@ class RecorderWindow(QWidget):
 
     def _on_process_error(self, error) -> None:
         if error == QProcess.ProcessError.FailedToStart:
-            self._append_log("FFmpeg sa nepodarilo spustiť: " + self.ffmpeg_path)
+            self._append_log(tr("FFmpeg sa nepodarilo spustiť: ") + self.ffmpeg_path)
             QTimer.singleShot(0, lambda: self._on_process_finished(-1, None))
 
     def _on_process_finished(self, exit_code: int, _status) -> None:
@@ -1406,16 +1548,16 @@ class RecorderWindow(QWidget):
         size = Path(self.output_path).stat().st_size if Path(self.output_path).is_file() else 0
         if exit_code == 0 or (self._stopping and size > 0):
             self.status_label.setStyleSheet("")
-            self.status_label.setText(f"Uložené: {Path(self.output_path).name} ({self._fmt_size(size)})")
+            self.status_label.setText(tr("Uložené: {name} ({size})").format(name=Path(self.output_path).name, size=self._fmt_size(size)))
             if self.tray.isVisible():
-                self.tray.showMessage(APP_NAME, f"Nahrávka uložená:\n{self.output_path}",
+                self.tray.showMessage(APP_NAME, tr("Nahrávka uložená:\n{path}").format(path=self.output_path),
                                       QSystemTrayIcon.MessageIcon.Information, 4000)
         else:
             self.status_label.setStyleSheet("color: #C62828;")
-            self.status_label.setText(f"FFmpeg skončil s chybou (kód {exit_code}).")
+            self.status_label.setText(tr("FFmpeg skončil s chybou (kód {code}).").format(code=exit_code))
             tail = "\n".join(self.log.toPlainText().splitlines()[-12:])
             self.log_check.setChecked(True)
-            QMessageBox.critical(self, APP_NAME, "Nahrávanie zlyhalo. Posledné riadky výstupu FFmpeg:\n\n" + tail)
+            QMessageBox.critical(self, APP_NAME, tr("Nahrávanie zlyhalo. Posledné riadky výstupu FFmpeg:\n\n") + tail)
         self._stopping = False
 
     def _update_status(self) -> None:
@@ -1425,7 +1567,7 @@ class RecorderWindow(QWidget):
         h, rem = divmod(elapsed, 3600)
         m, s = divmod(rem, 60)
         size = Path(self.output_path).stat().st_size if Path(self.output_path).is_file() else 0
-        text = f"● Nahráva sa  {h:02d}:{m:02d}:{s:02d}   {self._fmt_size(size)}"
+        text = tr("● Nahráva sa") + f"  {h:02d}:{m:02d}:{s:02d}   {self._fmt_size(size)}"
         self.status_label.setStyleSheet("color: #C62828; font-weight: 600;")
         self.status_label.setText(text)
         self.tray.setToolTip(f"{APP_NAME} – {text}")
@@ -1442,7 +1584,7 @@ class RecorderWindow(QWidget):
     def closeEvent(self, event) -> None:
         if self.process is not None:
             answer = QMessageBox.question(
-                self, APP_NAME, "Nahrávanie stále beží. Zastaviť ho a ukončiť aplikáciu?",
+                self, APP_NAME, tr("Nahrávanie stále beží. Zastaviť ho a ukončiť aplikáciu?"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -1466,11 +1608,19 @@ def main() -> int:
     app.setOrganizationName(ORG_NAME)
     app.setQuitOnLastWindowClosed(False)
 
+    # jazyk: nastavenie (zapisuje ho aj inštalátor) alebo jazyk Windows
+    set_language(detect_language(QSettings(ORG_NAME, "ScreenRecorder")))
+    qt_translator = QTranslator(app)
+    if _LANG != "en" and qt_translator.load(
+        "qtbase_" + _LANG, QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    ):
+        app.installTranslator(qt_translator)   # Áno/Nie a pod. v Qt dialógoch
+
     # jediná inštancia (druhé spustenie – napr. z autoštartu + zástupcu – len upozorní)
     lock = QLockFile(QDir.tempPath() + "/draftex-screen-recorder.lock")
     lock.setStaleLockTime(0)
     if not lock.tryLock(200):
-        QMessageBox.information(None, APP_NAME, "Aplikácia už beží – nájdeš ju ako ikonu v lište vedľa hodín.")
+        QMessageBox.information(None, APP_NAME, tr("Aplikácia už beží – nájdeš ju ako ikonu v lište vedľa hodín."))
         return 0
 
     window = RecorderWindow()
@@ -1480,11 +1630,11 @@ def main() -> int:
         hotkey_filter = HotkeyFilter(window.toggle_recording)
         app.installNativeEventFilter(hotkey_filter)
     else:
-        window.hide_check.setText("Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište)")
+        window.hide_check.setText(tr("Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište)"))
 
     # --tray: spustiť len do lišty (autoštart s Windows), inak zobraziť okno
     if "--tray" in sys.argv[1:] and window.tray.isVisible():
-        window.tray.showMessage(APP_NAME, f"Beží na pozadí. Nahrávanie: {HOTKEY_LABEL} alebo dvojklik na ikonu.",
+        window.tray.showMessage(APP_NAME, tr("Beží na pozadí. Nahrávanie: {hotkey} alebo dvojklik na ikonu.").format(hotkey=HOTKEY_LABEL),
                                 QSystemTrayIcon.MessageIcon.Information, 3000)
     else:
         window.show()
@@ -1492,6 +1642,13 @@ def main() -> int:
     code = app.exec()
     unregister_global_hotkey()
     lock.unlock()
+
+    if window.restart_requested:
+        # reštart po zmene jazyka (bez --tray, nech je okno hneď vidieť)
+        args = [a for a in sys.argv[1:] if a != "--tray"]
+        if not getattr(sys, "frozen", False):
+            args = [sys.argv[0], *args]
+        QProcess.startDetached(sys.executable, args)
     return code
 
 
