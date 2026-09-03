@@ -51,10 +51,15 @@ Pri pridaní nového textu do UI ho obal do `tr("…")` a doplň preklad do `TR_
 
 ## Podpísanie (EV certifikát)
 
-- EXE: pred spustením nastav `set SIGN_CMD=signtool sign /tr http://ts.ssl.com /td sha256 /fd sha256 /a`
-  (build.bat ho zavolá na `dist\...\DraftexScreenRecorder.exe`)
-- inštalátor: v Inno Setup *Tools › Configure Sign Tools* pridaj nástroj s názvom `draftex`
-  a v `installer.iss` odkomentuj riadky `SignTool=` a `SignedUninstaller=`
+- pred spustením pridaj signtool do PATH (cesta s medzerami v `SIGN_CMD` nesmie byť
+  v úvodzovkách, cmd by ju pri odovzdaní do ISCC rozbil) a nastav príkaz:
+  ```
+  set "PATH=C:\Program Files (x86)\Windows Kitsin.0.26100.0d;%PATH%"
+  set SIGN_CMD=signtool sign /sha1 <odtlačok certifikátu> /fd sha256 /tr http://ts.ssl.com /td sha256
+  ```
+- `build.bat` ním podpíše `dist\...\DraftexScreenRecorder.exe` a cez `ISCC /DSIGN "/Sdraftex=..."`
+  aj inštalátor a uninstaller (v `installer.iss` je to za `#ifdef SIGN`)
+- bez `SIGN_CMD` vznikne nepodpísaný build
 
 ## FFmpeg – licencia
 

@@ -38,9 +38,12 @@ CloseApplications=yes
 RestartApplications=no
 ; výber jazyka vždy; zvolený jazyk sa zapíše do registra a aplikácia ho prevezme
 ShowLanguageDialog=yes
-; Podpis inštalátora (Tools > Configure Sign Tools v Inno Setup, názov "draftex"):
-;SignTool=draftex $f
-;SignedUninstaller=yes
+; Podpis inštalátora a uninstalleru – build.bat pri nastavenom SIGN_CMD volá
+; ISCC /DSIGN "/Sdraftex=<SIGN_CMD> $f"; bez SIGN_CMD sa nepodpisuje
+#ifdef SIGN
+SignTool=draftex $f
+SignedUninstaller=yes
+#endif
 
 [Languages]
 ; názvy "sk" / "en" = hodnoty, ktoré aplikácia číta z registra (language)

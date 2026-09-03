@@ -59,7 +59,12 @@ if not exist "%ISCC%" (
     echo Prenositelna verzia je hotova v: dist\%APP%\
     goto :ok
 )
-"%ISCC%" /Q installer.iss || goto :fail
+rem --- podpis instalatora a uninstalleru rovnakym prikazom ako EXE (SIGN_CMD)
+if defined SIGN_CMD (
+    "%ISCC%" /Q /DSIGN "/Sdraftex=%SIGN_CMD% $f" installer.iss || goto :fail
+) else (
+    "%ISCC%" /Q installer.iss || goto :fail
+)
 
 echo.
 echo HOTOVO. Instalator: installer\%APP%-Setup-*.exe
