@@ -53,6 +53,7 @@ from PyQt6.QtCore import (
     QPoint,
     QProcess,
     QRect,
+    QRectF,
     QSettings,
     Qt,
     QTimer,
@@ -94,7 +95,7 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "Draftex Screen Recorder"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 ORG_NAME = "Draftex"
 IS_WINDOWS = sys.platform == "win32"
 
@@ -582,6 +583,77 @@ class RegionSelector(QObject):
 
 
 # --------------------------------------------------------------------------- #
+#  Rám vybranej oblasti – trvalo viditeľný, priepustný pre myš
+# --------------------------------------------------------------------------- #
+class RegionFrame(QWidget):
+    """Priesvitné okno cez celý monitor; kreslí rám okolo vybranej oblasti.
+
+    Rám je nakreslený TESNE MIMO oblasti (s 1 px medzerou), takže gdigrab ho
+    do videa nezachytí – vo videu je presne to, čo je vnútri rámu.
+    Okno je priepustné pre myš a klávesnicu a nikdy neberie fokus.
+    """
+
+    GAP = 1          # medzera medzi hranou oblasti a rámom (logické px)
+    RED_WIDTH = 2
+    WHITE_WIDTH = 1
+
+    def __init__(self, screen: QScreen):
+        super().__init__(
+            None,
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
+        )
+        self._screen = screen
+        self._region: QRect | None = None
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setScreen(screen)
+        self.setGeometry(screen.geometry())
+
+    def set_region(self, region: QRect | None) -> None:
+        self._region = region
+        self.update()
+
+    def _to_logical(self, r: QRect) -> QRectF:
+        """Fyzické absolútne súradnice → logické súradnice tohto okna (inverz RegionOverlay.to_physical)."""
+        dpr = float(self._screen.devicePixelRatio())
+        mon = window_rect_for_hwnd(int(self.winId()))
+        if mon is not None:
+            ox, oy = mon[0], mon[1]
+        else:
+            g = self._screen.geometry()
+            ox, oy = round(g.x() * dpr), round(g.y() * dpr)
+        return QRectF((r.x() - ox) / dpr, (r.y() - oy) / dpr, r.width() / dpr, r.height() / dpr)
+
+    def paintEvent(self, _event: QPaintEvent) -> None:
+        if self._region is None:
+            return
+        rect = self._to_logical(self._region)
+        if not rect.intersects(QRectF(self.rect())):
+            return   # oblasť je na inom monitore
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # červený rám: pásik [GAP, GAP+RED_WIDTH] mimo oblasti
+        d = self.GAP + self.RED_WIDTH / 2
+        pen = QPen(QColor("#FF5252"))
+        pen.setWidthF(self.RED_WIDTH)
+        p.setPen(pen)
+        p.drawRect(rect.adjusted(-d, -d, d, d))
+        # biely obrys zvonka pre kontrast na tmavom pozadí
+        d = self.GAP + self.RED_WIDTH + self.WHITE_WIDTH / 2
+        pen = QPen(QColor(255, 255, 255, 200))
+        pen.setWidthF(self.WHITE_WIDTH)
+        p.setPen(pen)
+        p.drawRect(rect.adjusted(-d, -d, d, d))
+        p.end()
+
+
+# --------------------------------------------------------------------------- #
 #  Ikony
 # --------------------------------------------------------------------------- #
 def make_icon(recording: bool) -> QIcon:
@@ -620,12 +692,18 @@ class RecorderWindow(QWidget):
         self.started_at: datetime | None = None
         self._hidden_for_recording = False
         self._selector: RegionSelector | None = None
+        self._frames: list[RegionFrame] = []
+        self._picking_region = False
         self._stopping = False
 
         self._build_ui()
         self._build_tray()
         self._load_settings()
         self._detect_ffmpeg()
+
+        app = QApplication.instance()
+        app.screenAdded.connect(lambda _s: self._rebuild_region_frames())
+        app.screenRemoved.connect(lambda _s: self._rebuild_region_frames())
 
         self.tick = QTimer(self)
         self.tick.setInterval(500)
@@ -753,7 +831,11 @@ class RecorderWindow(QWidget):
         self.record_btn = QPushButton("●  Nahrávať")
         self.record_btn.setMinimumHeight(44)
         self.record_btn.setStyleSheet(
-            "QPushButton { font-size: 15px; font-weight: 600; padding: 6px 22px; }"
+            "QPushButton { font-size: 15px; font-weight: 600; padding: 6px 22px;"
+            "  color: white; background-color: #D32F2F; border: 1px solid #B71C1C; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #E53935; }"
+            "QPushButton:pressed { background-color: #B71C1C; }"
+            "QPushButton:disabled { color: #F5F5F5; background-color: #EF9A9A; border-color: #E57373; }"
         )
         self.record_btn.clicked.connect(self.toggle_recording)
         self.open_btn = QPushButton("Otvoriť priečinok")
@@ -880,6 +962,7 @@ class RecorderWindow(QWidget):
         full = self.radio_full.isChecked()
         self.monitor_combo.setEnabled(full)
         self.region_btn.setEnabled(not full)
+        self._update_region_frame()
 
     def _toggle_log(self, on: bool) -> None:
         self.log.setVisible(on)
@@ -922,6 +1005,7 @@ class RecorderWindow(QWidget):
             self.stop_recording()
             self.process.waitForFinished(10000)
         self._save_settings()
+        self._drop_region_frames()
         self.tray.hide()
         QApplication.quit()
 
@@ -946,17 +1030,45 @@ class RecorderWindow(QWidget):
     def _pick_region(self) -> None:
         self._selector = RegionSelector(self)
         self._selector.finished.connect(self._region_picked)
+        self._picking_region = True
+        self._update_region_frame()          # počas výberu rám skryť
         self.hide()
         QTimer.singleShot(250, self._selector.start)
 
     def _region_picked(self, rect) -> None:
+        self._picking_region = False
         self._show_window()
-        if rect is None:
+        if rect is not None:
+            self.region = rect
+            self.radio_region.setChecked(True)
+            self.region_label.setStyleSheet("")
+            self.region_label.setText(f"X {rect.x()}, Y {rect.y()}  –  {rect.width()} × {rect.height()} px")
+        self._update_region_frame()
+
+    # ---- rám vybranej oblasti (viditeľný stále, kým je zvolený režim "Vybraná oblasť")
+    def _update_region_frame(self) -> None:
+        show = self.radio_region.isChecked() and self.region is not None and not self._picking_region
+        if not show:
+            for f in self._frames:
+                f.hide()
             return
-        self.region = rect
-        self.radio_region.setChecked(True)
-        self.region_label.setStyleSheet("")
-        self.region_label.setText(f"X {rect.x()}, Y {rect.y()}  –  {rect.width()} × {rect.height()} px")
+        if not self._frames:
+            self._frames = [RegionFrame(s) for s in QApplication.screens()]
+        for f in self._frames:
+            f.set_region(self.region)
+            if not f.isVisible():
+                f.show()
+                f.setGeometry(f.screen().geometry())
+
+    def _drop_region_frames(self) -> None:
+        for f in self._frames:
+            f.close()
+            f.deleteLater()
+        self._frames = []
+
+    def _rebuild_region_frames(self) -> None:
+        self._drop_region_frames()
+        self._update_region_frame()
 
     # ------------------------------------------------------------ nahrávanie
     def toggle_recording(self) -> None:
@@ -1170,6 +1282,7 @@ class RecorderWindow(QWidget):
             if self.process is not None:
                 self.process.waitForFinished(10000)
         self._save_settings()
+        self._drop_region_frames()
         self.tray.hide()
         event.accept()
         QApplication.quit()

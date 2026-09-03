@@ -2,7 +2,7 @@
 ; Build:  build.bat  (alebo: ISCC.exe installer.iss po pyinstaller + skopírovaní ffmpeg.exe do dist\)
 
 #define MyAppName      "Draftex Screen Recorder"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "1.0.1"
 #define MyAppPublisher "Draftex s.r.o."
 #define MyAppURL       "https://draftex.sk"
 #define MyAppExeName   "DraftexScreenRecorder.exe"
