@@ -72,6 +72,7 @@ from PyQt6.QtGui import (
     QPaintEvent,
     QPen,
     QPixmap,
+    QRegion,
     QScreen,
 )
 from PyQt6.QtWidgets import (
@@ -586,16 +587,24 @@ class RegionSelector(QObject):
 #  Rám vybranej oblasti – trvalo viditeľný, priepustný pre myš
 # --------------------------------------------------------------------------- #
 class RegionFrame(QWidget):
-    """Priesvitné okno cez celý monitor; kreslí rám okolo vybranej oblasti.
+    """Priesvitné okno cez celý monitor; kreslí rám okolo vybranej oblasti
+    a umožňuje ťahaním za hranu / roh meniť jej rozmer.
 
     Rám je nakreslený TESNE MIMO oblasti (s 1 px medzerou), takže gdigrab ho
     do videa nezachytí – vo videu je presne to, čo je vnútri rámu.
-    Okno je priepustné pre myš a klávesnicu a nikdy neberie fokus.
+    Maska okna pokrýva len úzky pás okolo hrán: kliky mimo pásu prechádzajú
+    do aplikácií pod rámom, kliky na pás chytia hranu. Okno neberie fokus.
+    Počas nahrávania je rám zamknutý (úplne priepustný pre vstup).
     """
 
-    GAP = 1          # medzera medzi hranou oblasti a rámom (logické px)
+    regionChanged = pyqtSignal(QRect)   # fyzické pixely, absolútne súradnice
+
+    GAP = 1            # medzera medzi hranou oblasti a rámom (logické px)
     RED_WIDTH = 2
     WHITE_WIDTH = 1
+    GRIP_OUT = 8       # pás na chytenie hrany – zvonka
+    GRIP_IN = 4        # ... a zvnútra
+    MIN_SIZE = 32      # minimálny rozmer oblasti (fyzické px)
 
     def __init__(self, screen: QScreen):
         super().__init__(
@@ -604,20 +613,40 @@ class RegionFrame(QWidget):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput
             | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
         self._screen = screen
         self._region: QRect | None = None
+        self._locked = False
+        self._drag_edges: tuple[bool, bool, bool, bool] | None = None   # (left, top, right, bottom)
+        self._drag_start_pos: QPoint | None = None
+        self._drag_start_region: QRect | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
         self.setScreen(screen)
         self.setGeometry(screen.geometry())
 
+    # ---- verejné API
     def set_region(self, region: QRect | None) -> None:
         self._region = region
+        if self.isVisible():
+            self._apply_mask()
         self.update()
 
+    def set_locked(self, locked: bool) -> None:
+        """Zamknúť počas nahrávania: rám je vidieť, ale nedá sa chytiť."""
+        if locked == self._locked:
+            return
+        self._locked = locked
+        self._drag_edges = None
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, locked)
+        if was_visible:
+            self.show()
+            self.setGeometry(self._screen.geometry())
+
+    # ---- geometria
     def _to_logical(self, r: QRect) -> QRectF:
         """Fyzické absolútne súradnice → logické súradnice tohto okna (inverz RegionOverlay.to_physical)."""
         dpr = float(self._screen.devicePixelRatio())
@@ -629,6 +658,118 @@ class RegionFrame(QWidget):
             ox, oy = round(g.x() * dpr), round(g.y() * dpr)
         return QRectF((r.x() - ox) / dpr, (r.y() - oy) / dpr, r.width() / dpr, r.height() / dpr)
 
+    def _apply_mask(self) -> None:
+        if self._region is None:
+            self.setMask(QRegion(0, 0, 1, 1))
+            return
+        r = self._to_logical(self._region).toAlignedRect()
+        outer = r.adjusted(-self.GRIP_OUT, -self.GRIP_OUT, self.GRIP_OUT, self.GRIP_OUT)
+        inner = r.adjusted(self.GRIP_IN, self.GRIP_IN, -self.GRIP_IN, -self.GRIP_IN)
+        region = QRegion(outer.intersected(self.rect()))
+        if inner.isValid():
+            region = region.subtracted(QRegion(inner))
+        self.setMask(region)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._apply_mask)   # až keď má okno finálnu polohu
+
+    def _hit_edges(self, pos: QPoint) -> tuple[bool, bool, bool, bool] | None:
+        if self._region is None:
+            return None
+        r = self._to_logical(self._region).toAlignedRect()
+        x, y = pos.x(), pos.y()
+        in_x = r.left() - self.GRIP_OUT <= x <= r.right() + self.GRIP_OUT
+        in_y = r.top() - self.GRIP_OUT <= y <= r.bottom() + self.GRIP_OUT
+        if not (in_x and in_y):
+            return None
+        left = abs(x - r.left()) <= self.GRIP_OUT and x <= r.left() + self.GRIP_IN
+        right = abs(x - r.right()) <= self.GRIP_OUT and x >= r.right() - self.GRIP_IN
+        top = abs(y - r.top()) <= self.GRIP_OUT and y <= r.top() + self.GRIP_IN
+        bottom = abs(y - r.bottom()) <= self.GRIP_OUT and y >= r.bottom() - self.GRIP_IN
+        if not (left or right or top or bottom):
+            return None
+        return left, top, right, bottom
+
+    @staticmethod
+    def _cursor_for(edges: tuple[bool, bool, bool, bool] | None) -> Qt.CursorShape:
+        if edges is None:
+            return Qt.CursorShape.ArrowCursor
+        left, top, right, bottom = edges
+        if (left and top) or (right and bottom):
+            return Qt.CursorShape.SizeFDiagCursor
+        if (left and bottom) or (right and top):
+            return Qt.CursorShape.SizeBDiagCursor
+        if left or right:
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.SizeVerCursor
+
+    def _dragged_region(self, pos: QPoint) -> QRect:
+        assert self._drag_edges and self._drag_start_pos is not None and self._drag_start_region is not None
+        dpr = float(self._screen.devicePixelRatio())
+        dx = round((pos.x() - self._drag_start_pos.x()) * dpr)
+        dy = round((pos.y() - self._drag_start_pos.y()) * dpr)
+        left, top, right, bottom = self._drag_edges
+        r = self._drag_start_region
+        x1, y1 = r.x(), r.y()
+        x2, y2 = r.x() + r.width(), r.y() + r.height()   # exkluzívne hrany
+        if left:
+            x1 = min(x1 + dx, x2 - self.MIN_SIZE)
+        if right:
+            x2 = max(x2 + dx, x1 + self.MIN_SIZE)
+        if top:
+            y1 = min(y1 + dy, y2 - self.MIN_SIZE)
+        if bottom:
+            y2 = max(y2 + dy, y1 + self.MIN_SIZE)
+        # párne rozmery (libx264 / yuv420p) – upraví sa ťahaná hrana
+        if (x2 - x1) % 2:
+            if left:
+                x1 += 1
+            else:
+                x2 -= 1
+        if (y2 - y1) % 2:
+            if top:
+                y1 += 1
+            else:
+                y2 -= 1
+        return QRect(x1, y1, x2 - x1, y2 - y1)
+
+    # ---- myš
+    def mousePressEvent(self, e: QMouseEvent) -> None:
+        if self._locked or e.button() != Qt.MouseButton.LeftButton:
+            return
+        edges = self._hit_edges(e.position().toPoint())
+        if edges is None or self._region is None:
+            return
+        self._drag_edges = edges
+        self._drag_start_pos = e.position().toPoint()
+        self._drag_start_region = QRect(self._region)
+        self.setCursor(self._cursor_for(edges))
+        e.accept()
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        if self._drag_edges is not None:
+            self._region = self._dragged_region(e.position().toPoint())
+            self._apply_mask()
+            self.update()
+            self.regionChanged.emit(QRect(self._region))
+            e.accept()
+            return
+        if not self._locked:
+            self.setCursor(self._cursor_for(self._hit_edges(e.position().toPoint())))
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if self._drag_edges is None or e.button() != Qt.MouseButton.LeftButton:
+            return
+        self._region = self._dragged_region(e.position().toPoint())
+        self._drag_edges = None
+        self._apply_mask()
+        self.update()
+        self.regionChanged.emit(QRect(self._region))
+        self.setCursor(self._cursor_for(self._hit_edges(e.position().toPoint())))
+        e.accept()
+
+    # ---- kreslenie
     def paintEvent(self, _event: QPaintEvent) -> None:
         if self._region is None:
             return
@@ -650,6 +791,20 @@ class RegionFrame(QWidget):
         pen.setWidthF(self.WHITE_WIDTH)
         p.setPen(pen)
         p.drawRect(rect.adjusted(-d, -d, d, d))
+        # počas ťahania rozmer v rohu oblasti (nahrávanie vtedy nebeží, do videa sa nedostane)
+        if self._drag_edges is not None:
+            label = f"{self._region.width()} × {self._region.height()} px"
+            p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            f = QFont(); f.setPointSize(10); f.setBold(True)
+            p.setFont(f)
+            fm = p.fontMetrics()
+            w, h = fm.horizontalAdvance(label) + 14, fm.height() + 8
+            box = QRect(int(rect.left()) + 4, int(rect.top()) + 4, w, h)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(box, 4, 4)
+            p.setPen(QColor("white"))
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
         p.end()
 
 
@@ -1015,6 +1170,8 @@ class RecorderWindow(QWidget):
         icon = make_icon(recording)
         self.tray.setIcon(icon)
         self.setWindowIcon(icon)
+        for f in self._frames:
+            f.set_locked(recording)
         for w in (
             self.radio_full, self.radio_region, self.monitor_combo, self.region_btn,
             self.fps_combo, self.encoder_combo, self.quality_combo, self.cursor_check,
@@ -1041,9 +1198,19 @@ class RecorderWindow(QWidget):
         if rect is not None:
             self.region = rect
             self.radio_region.setChecked(True)
-            self.region_label.setStyleSheet("")
-            self.region_label.setText(f"X {rect.x()}, Y {rect.y()}  –  {rect.width()} × {rect.height()} px")
+            self._set_region_text(rect)
         self._update_region_frame()
+
+    def _set_region_text(self, rect: QRect) -> None:
+        self.region_label.setStyleSheet("")
+        self.region_label.setText(f"X {rect.x()}, Y {rect.y()}  –  {rect.width()} × {rect.height()} px")
+
+    def _region_dragged(self, rect: QRect) -> None:
+        """Používateľ potiahol hranu rámu – prevziať nový rozmer."""
+        self.region = QRect(rect)
+        self._set_region_text(rect)
+        for f in self._frames:
+            f.set_region(self.region)
 
     # ---- rám vybranej oblasti (viditeľný stále, kým je zvolený režim "Vybraná oblasť")
     def _update_region_frame(self) -> None:
@@ -1054,7 +1221,10 @@ class RecorderWindow(QWidget):
             return
         if not self._frames:
             self._frames = [RegionFrame(s) for s in QApplication.screens()]
+            for f in self._frames:
+                f.regionChanged.connect(self._region_dragged)
         for f in self._frames:
+            f.set_locked(self.process is not None)
             f.set_region(self.region)
             if not f.isVisible():
                 f.show()
