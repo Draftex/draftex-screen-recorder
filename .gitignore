@@ -1,0 +1,7 @@
+.venv/
+build/
+dist/
+installer/
+ffmpeg/
+__pycache__/
+*.pyc
