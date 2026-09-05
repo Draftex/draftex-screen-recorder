@@ -99,7 +99,7 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "Draftex Screen Recorder"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 ORG_NAME = "Draftex"
 IS_WINDOWS = sys.platform == "win32"
 
