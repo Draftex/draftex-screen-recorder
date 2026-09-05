@@ -105,6 +105,7 @@ IS_WINDOWS = sys.platform == "win32"
 
 HOTKEY_ID = 0xD7A1
 WM_HOTKEY = 0x0312
+WM_DEVICECHANGE = 0x0219      # pripojenie / odpojenie zariadenia (Bluetooth, jack, USB)
 HOTKEY_LABEL = "Ctrl+Shift+F9"
 
 FPS_OPTIONS = [15, 24, 30, 60]
@@ -158,10 +159,15 @@ TR_EN: dict[str, str] = {
     "Zmiešať s druhým zariadením:": "Mix with a second device:",
     "Zvuk systému („čo počujem“) sa nahrá cez zariadenie <b>Stereo Mix</b> "
     "(zapni ho v Nastavenia › Zvuk › Nahrávanie) alebo cez virtuálny kábel (VB-Cable). "
-    "Mikrofón + systém zmiešaš zapnutím druhého zariadenia.":
+    "Mikrofón + systém zmiešaš zapnutím druhého zariadenia. "
+    "Bluetooth slúchadlá s mikrofónom sa po pripojení objavia ako „Headset (… Hands-Free)“, "
+    "zoznam sa obnoví automaticky.":
         "System audio (“what you hear”) is recorded through the <b>Stereo Mix</b> device "
         "(enable it in Settings › Sound › Recording) or through a virtual cable (VB-Cable). "
-        "Mix microphone + system audio by enabling the second device.",
+        "Mix microphone + system audio by enabling the second device. "
+        "Bluetooth headphones with a microphone appear as “Headset (… Hands-Free)” once connected; "
+        "the list refreshes automatically.",
+    "Zvukové zariadenia sa zmenili: ": "Audio devices changed: ",
     "Výstup": "Output",
     "Priečinok:": "Folder:",
     "Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište alebo {hotkey})":
@@ -317,8 +323,9 @@ def list_dshow_audio_devices(ffmpeg: str) -> list[AudioDevice]:
 
     for raw in out.splitlines():
         line = raw.strip()
-        if line.startswith("[dshow"):
-            line = line.split("]", 1)[1].strip() if "]" in line else line
+        if line.startswith("[") and "]" in line:
+            # "[dshow @ 0x...]" (staré verzie) alebo "[in#0 @ 0x...]" (FFmpeg 7+)
+            line = line.split("]", 1)[1].strip()
 
         if "DirectShow audio devices" in line:
             section = "audio"
@@ -497,10 +504,13 @@ def window_rect_for_hwnd(hwnd: int) -> tuple[int, int, int, int] | None:
 # --------------------------------------------------------------------------- #
 #  Globálna klávesová skratka (Win32 RegisterHotKey + Qt native event filter)
 # --------------------------------------------------------------------------- #
-class HotkeyFilter(QAbstractNativeEventFilter):
-    def __init__(self, callback):
+class NativeMessageFilter(QAbstractNativeEventFilter):
+    """Globálna skratka (WM_HOTKEY) a zmena zariadení (WM_DEVICECHANGE – Bluetooth slúchadlá, mikrofón v jacku)."""
+
+    def __init__(self, on_hotkey=None, on_device_change=None):
         super().__init__()
-        self._callback = callback
+        self._on_hotkey = on_hotkey
+        self._on_device_change = on_device_change
 
     def nativeEventFilter(self, event_type, message):
         try:
@@ -509,7 +519,11 @@ class HotkeyFilter(QAbstractNativeEventFilter):
 
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                    self._callback()
+                    if self._on_hotkey is not None:
+                        self._on_hotkey()
+                elif msg.message == WM_DEVICECHANGE:
+                    if self._on_device_change is not None:
+                        self._on_device_change()
         except Exception:
             pass
         return False, 0
@@ -974,6 +988,12 @@ class RecorderWindow(QWidget):
         self.tick.setInterval(500)
         self.tick.timeout.connect(self._update_status)
 
+        # zmena zvukových zariadení (Bluetooth, jack, USB) – zoznam obnoviť s odstupom 2 s
+        self._devchange_timer = QTimer(self)
+        self._devchange_timer.setSingleShot(True)
+        self._devchange_timer.setInterval(2000)
+        self._devchange_timer.timeout.connect(self._on_devices_changed)
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1068,7 +1088,9 @@ class RecorderWindow(QWidget):
         hint = QLabel(tr(
             "Zvuk systému („čo počujem“) sa nahrá cez zariadenie <b>Stereo Mix</b> "
             "(zapni ho v Nastavenia › Zvuk › Nahrávanie) alebo cez virtuálny kábel (VB-Cable). "
-            "Mikrofón + systém zmiešaš zapnutím druhého zariadenia."
+            "Mikrofón + systém zmiešaš zapnutím druhého zariadenia. "
+            "Bluetooth slúchadlá s mikrofónom sa po pripojení objavia ako „Headset (… Hands-Free)“, "
+            "zoznam sa obnoví automaticky."
         ))
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #777;")
@@ -1239,6 +1261,19 @@ class RecorderWindow(QWidget):
         if not self.audio_devices:
             self.audio_combo.addItem(tr("(žiadne zvukové zariadenie sa nenašlo)"), None)
             self.audio2_combo.addItem(tr("(žiadne zvukové zariadenie sa nenašlo)"), None)
+
+    def schedule_audio_refresh(self) -> None:
+        """Volané z WM_DEVICECHANGE (viackrát za sebou) – obnova prebehne až po utíšení."""
+        self._devchange_timer.start()
+
+    def _on_devices_changed(self) -> None:
+        if self.process is not None or not self.ffmpeg_path:
+            return
+        before = [d.name for d in self.audio_devices]
+        self._refresh_audio_devices()
+        after = [d.name for d in self.audio_devices]
+        if after != before:
+            self._append_log(tr("Zvukové zariadenia sa zmenili: ") + (", ".join(after) or "–"))
 
     # ------------------------------------------------------------- pomocné
     def _sync_mode_widgets(self) -> None:
@@ -1625,11 +1660,13 @@ def main() -> int:
 
     window = RecorderWindow()
 
-    hotkey_filter = None
-    if register_global_hotkey():
-        hotkey_filter = HotkeyFilter(window.toggle_recording)
-        app.installNativeEventFilter(hotkey_filter)
-    else:
+    hotkey_ok = register_global_hotkey()
+    msg_filter = NativeMessageFilter(
+        on_hotkey=window.toggle_recording if hotkey_ok else None,
+        on_device_change=window.schedule_audio_refresh,
+    )
+    app.installNativeEventFilter(msg_filter)
+    if not hotkey_ok:
         window.hide_check.setText(tr("Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište)"))
 
     # --tray: spustiť len do lišty (autoštart s Windows), inak zobraziť okno
