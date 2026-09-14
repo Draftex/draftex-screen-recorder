@@ -116,7 +116,7 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "Draftex Screen Recorder"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 ORG_NAME = "Draftex"
 IS_WINDOWS = sys.platform == "win32"
 
@@ -550,6 +550,12 @@ def build_ffmpeg_args(
             "-thread_queue_size", "1024",
             "-rtbufsize", "256M",
             "-audio_buffer_size", "50",
+            # Zariadenie pri otvorení vysype, čo má nabufferované (Bluetooth headset
+            # aj ~2 s). Bez tohto by audio bežalo pred obrazom a FFmpeg by to prvé
+            # sekundy dorovnával duplikovanými snímkami – práve to bolo vidieť ako
+            # sekanie na začiatku záznamu. Časovanie podľa systémových hodín položí
+            # každý paket na čas, kedy naozaj prišiel.
+            "-use_wallclock_as_timestamps", "1",
             "-f", "dshow",
             "-i", f"audio={dev.dshow_id}",
         ]
