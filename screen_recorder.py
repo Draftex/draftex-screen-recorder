@@ -116,7 +116,7 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "Draftex Screen Recorder"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 ORG_NAME = "Draftex"
 IS_WINDOWS = sys.platform == "win32"
 
@@ -126,6 +126,12 @@ WM_DEVICECHANGE = 0x0219      # pripojenie / odpojenie zariadenia (Bluetooth, ja
 HOTKEY_LABEL = "Ctrl+Shift+F9"
 
 FPS_OPTIONS = [15, 24, 30, 60]
+
+# Zachytávanie obrazu:
+#   "dda" = Desktop Duplication API (cez GPU, na 3440x1440 zvládne ~63 sn./s)
+#   "gdi" = GDI BitBlt (univerzálne, ale na 3440x1440 len ~37 sn./s)
+CAPTURE_DDA = "dda"
+CAPTURE_GDI = "gdi"
 
 # kvalita -> (CRF pre libx264, bity na pixel a snímku pre HW kodéry)
 QUALITY = {
@@ -185,6 +191,9 @@ TR_EN: dict[str, str] = {
         "Bluetooth headphones with a microphone appear as “Headset (… Hands-Free)” once connected; "
         "the list refreshes automatically.",
     "Zvukové zariadenia sa zmenili: ": "Audio devices changed: ",
+    "Kodér nie je použiteľný, vynechávam: ": "Encoder is not usable, skipping: ",
+    "Rýchle zachytávanie je dostupné, výstupov: ": "Fast capture is available, outputs: ",
+    "Rýchle zachytávanie zlyhalo, prepínam na GDI.": "Fast capture failed, switching to GDI.",
     "Výstup": "Output",
     "Priečinok:": "Folder:",
     "Skryť toto okno počas nahrávania (zastavíš cez ikonu v lište alebo {hotkey})":
@@ -268,6 +277,24 @@ class AudioDevice:
 
 
 @dataclass
+class CaptureTarget:
+    """Ako sa má zachytávať obraz – pripravené pre build_ffmpeg_args()."""
+    backend: str                              # CAPTURE_DDA / CAPTURE_GDI
+    region: QRect | None = None               # gdigrab: absolútne fyzické pixely
+    output_idx: int = 0                       # ddagrab: index DXGI výstupu
+    offset: tuple[int, int] | None = None      # ddagrab: posun v rámci výstupu
+    size: tuple[int, int] | None = None        # ddagrab: rozmer výrezu
+
+    @property
+    def est_size(self) -> tuple[int, int]:
+        if self.size is not None:
+            return self.size
+        if self.region is not None:
+            return self.region.width(), self.region.height()
+        return 1920, 1080
+
+
+@dataclass
 class Monitor:
     name: str
     left: int
@@ -322,6 +349,101 @@ def find_ffmpeg(preferred: str = "") -> str:
         if c and Path(c).is_file():
             return str(Path(c))
     return ""
+
+
+_probe_cache: dict[tuple, object] = {}
+
+
+def clear_probe_cache() -> None:
+    """Zabudnúť výsledky sond – po zmene monitorov alebo cesty k ffmpeg."""
+    _probe_cache.clear()
+
+
+def encoder_works(ffmpeg: str, encoder: str) -> bool:
+    """Naozaj zakóduje? Kodér môže byť v zozname a pritom zlyhať na ovládači.
+
+    Napr. NVENC vyžaduje novší ovládač NVIDIA, než má používateľ nainštalovaný;
+    bez tejto kontroly by aplikácia ponúkla kodér, s ktorým nahrávanie spadne.
+    """
+    if encoder == "libx264":
+        return True
+    key = ("enc", ffmpeg, encoder)
+    if key in _probe_cache:
+        return bool(_probe_cache[key])
+    out = run_ffmpeg_text(ffmpeg, [
+        "-hide_banner", "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=5",
+        "-frames:v", "3", "-c:v", encoder, "-f", "null", "-",
+    ], timeout=25)
+    bad = ("Conversion failed", "Error while opening encoder", "Cannot load",
+           "Could not open encoder", "not supported", "No capable devices")
+    result = not any(b.lower() in out.lower() for b in bad)
+    _probe_cache[key] = result
+    return result
+
+
+def probe_dxgi_outputs(ffmpeg: str, limit: int = 4) -> list[tuple[int, int, int]]:
+    """Dostupné výstupy Desktop Duplication ako (index, šírka, výška)."""
+    if not IS_WINDOWS:
+        return []
+    key = ("dxgi", ffmpeg)
+    if key in _probe_cache:
+        return list(_probe_cache[key])           # type: ignore[arg-type]
+    found: list[tuple[int, int, int]] = []
+    for idx in range(limit):
+        out = run_ffmpeg_text(ffmpeg, [
+            "-hide_banner", "-loglevel", "verbose",
+            "-f", "lavfi", "-i", f"ddagrab=output_idx={idx}:framerate=5",
+            "-frames:v", "2", "-f", "null", "-",
+        ], timeout=20)
+        m = re.search(r"Opened dxgi output \d+ with dimensions (\d+)x(\d+)", out)
+        if not m:
+            break
+        found.append((idx, int(m.group(1)), int(m.group(2))))
+    _probe_cache[key] = found
+    return found
+
+
+def choose_capture(
+    region: QRect | None,
+    monitor_idx: int | None,
+    monitors: list[Monitor],
+    dxgi: list[tuple[int, int, int]],
+) -> CaptureTarget:
+    """Vyberie najrýchlejšie zachytávanie, ktoré pre daný cieľ bezpečne sedí.
+
+    Desktop Duplication zachytáva vždy jeden výstup, takže ho použijeme len vtedy,
+    keď cieľ leží celý na jednom monitore a ten vieme jednoznačne priradiť
+    k výstupu podľa rozlíšenia. Inak ostane GDI, ktoré zvládne čokoľvek.
+    """
+    gdi = CaptureTarget(CAPTURE_GDI, region=region)
+    if not dxgi or not monitors:
+        return gdi
+
+    if region is not None:
+        target = region
+    elif monitor_idx is not None and 0 <= monitor_idx < len(monitors):
+        target = monitors[monitor_idx].rect
+    elif len(monitors) == 1:
+        target = monitors[0].rect
+    else:
+        return gdi                      # celá plocha cez viac monitorov
+
+    host = next((m for m in monitors if m.rect.contains(target)), None)
+    if host is None:
+        return gdi                      # cieľ presahuje cez viac monitorov
+
+    matching = [o for o in dxgi if (o[1], o[2]) == (host.width, host.height)]
+    if len(matching) != 1:
+        return gdi                      # priradenie k výstupu nie je jednoznačné
+
+    idx = matching[0][0]
+    return CaptureTarget(
+        CAPTURE_DDA,
+        region=region,
+        output_idx=idx,
+        offset=(target.x() - host.left, target.y() - host.top),
+        size=(target.width(), target.height()),
+    )
 
 
 def list_video_encoders(ffmpeg: str) -> list[tuple[str, str]]:
@@ -381,31 +503,46 @@ def list_dshow_audio_devices(ffmpeg: str) -> list[AudioDevice]:
 def build_ffmpeg_args(
     *,
     fps: int,
-    region: QRect | None,
+    capture: CaptureTarget,
     cursor: bool,
     encoder: str,
     quality: str,
     audio: list[AudioDevice],
     output: str,
-    est_size: tuple[int, int],
 ) -> list[str]:
     """Zostaví parametre pre ffmpeg (bez názvu programu)."""
     args = ["-hide_banner", "-y", "-loglevel", "info", "-nostats"]
+    est_size = capture.est_size
 
-    # --- obraz: GDI zachytenie celej plochy / oblasti (vidí menu, popupy, kurzor)
-    args += [
-        "-thread_queue_size", "1024",
-        "-f", "gdigrab",
-        "-framerate", str(fps),
-        "-draw_mouse", "1" if cursor else "0",
-    ]
-    if region is not None:
-        args += [
-            "-offset_x", str(region.x()),
-            "-offset_y", str(region.y()),
-            "-video_size", f"{region.width()}x{region.height()}",
+    # --- obraz: obe metódy vidia menu, popupy aj tooltipy; DDA je výrazne rýchlejšia
+    if capture.backend == CAPTURE_DDA:
+        opts = [
+            f"output_idx={capture.output_idx}",
+            f"framerate={fps}",
+            f"draw_mouse={1 if cursor else 0}",
         ]
-    args += ["-i", "desktop"]
+        if capture.offset is not None and capture.size is not None:
+            opts += [
+                f"offset_x={capture.offset[0]}",
+                f"offset_y={capture.offset[1]}",
+                f"video_size={capture.size[0]}x{capture.size[1]}",
+            ]
+        args += ["-f", "lavfi", "-i", "ddagrab=" + ":".join(opts)]
+    else:
+        args += [
+            "-thread_queue_size", "1024",
+            "-f", "gdigrab",
+            "-framerate", str(fps),
+            "-draw_mouse", "1" if cursor else "0",
+        ]
+        region = capture.region
+        if region is not None:
+            args += [
+                "-offset_x", str(region.x()),
+                "-offset_y", str(region.y()),
+                "-video_size", f"{region.width()}x{region.height()}",
+            ]
+        args += ["-i", "desktop"]
 
     # --- zvuk: DirectShow zariadenia z Windows
     for dev in audio:
@@ -418,7 +555,9 @@ def build_ffmpeg_args(
         ]
 
     # --- filtre: párne rozmery (H.264 to vyžaduje) + yuv420p, prípadne mix zvuku
-    graph = ["[0:v]crop=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v]"]
+    # pri DDA prídu snímky v pamäti GPU, treba ich najprv stiahnuť
+    pre = "hwdownload,format=bgra," if capture.backend == CAPTURE_DDA else ""
+    graph = [f"[0:v]{pre}crop=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v]"]
     if len(audio) >= 2:
         inputs = "".join(f"[{i + 1}:a]" for i in range(len(audio)))
         graph.append(
@@ -501,6 +640,25 @@ def list_monitors() -> list[Monitor]:
     user32.EnumDisplayMonitors(None, None, MonitorEnumProc(callback), 0)
     monitors.sort(key=lambda m: (not m.primary, m.left, m.top))
     return monitors or [Monitor("DISPLAY1", 0, 0, 1920, 1080, True)]
+
+
+def raise_process_priority(pid: int) -> bool:
+    """Zachytávanie obrazovky beží v reálnom čase – vyššia priorita znižuje
+    počet zmeškaných snímok, keď je systém zaťažený."""
+    if not IS_WINDOWS or pid <= 0:
+        return False
+    try:
+        PROCESS_SET_INFORMATION = 0x0200
+        ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
+        if not handle:
+            return False
+        ok = bool(k32.SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS))
+        k32.CloseHandle(handle)
+        return ok
+    except Exception:
+        return False
 
 
 def window_rect_for_hwnd(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -981,6 +1139,11 @@ class RecorderWindow(QWidget):
         self.settings = QSettings(ORG_NAME, "ScreenRecorder")
         self.monitors: list[Monitor] = list_monitors()
         self.audio_devices: list[AudioDevice] = []
+        self.dxgi_outputs: list[tuple[int, int, int]] = []
+        self._force_gdi = False          # po zlyhaní DDA sa drží núdzová cesta
+        self._capture_used: CaptureTarget | None = None
+        self._retry_args: list[str] | None = None
+        self._launched_at: datetime | None = None
         self.region: QRect | None = None
         self.output_path = ""
         self.process: QProcess | None = None
@@ -1253,10 +1416,23 @@ class RecorderWindow(QWidget):
         self.status_label.setStyleSheet("")
         self.status_label.setText(tr("Pripravené."))
 
+        # Desktop Duplication – raz zistiť dostupné výstupy (rýchlejšie zachytávanie)
+        self.dxgi_outputs = probe_dxgi_outputs(path)
+        if self.dxgi_outputs:
+            self._append_log(tr("Rýchle zachytávanie je dostupné, výstupov: ")
+                             + str(len(self.dxgi_outputs)))
+
         wanted = self.settings.value("encoder", "libx264", str)
         self.encoder_combo.clear()
         for name, label in list_video_encoders(path):
+            if not encoder_works(path, name):
+                # kodér je skompilovaný v ffmpeg, ale na tomto stroji nenabehne
+                # (typicky NVENC so starším ovládačom) – neponúkať ho
+                self._append_log(tr("Kodér nie je použiteľný, vynechávam: ") + label)
+                continue
             self.encoder_combo.addItem(tr(label), name)
+        if self.encoder_combo.count() == 0:
+            self.encoder_combo.addItem(tr(ENCODER_LABELS[0][1]), ENCODER_LABELS[0][0])
         idx = self.encoder_combo.findData(wanted)
         self.encoder_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
@@ -1433,6 +1609,12 @@ class RecorderWindow(QWidget):
     def _rebuild_region_frames(self) -> None:
         self._drop_region_frames()
         self._update_region_frame()
+        # zmena monitorov mení aj výstupy Desktop Duplication
+        clear_probe_cache()
+        self.monitors = list_monitors()
+        self._force_gdi = False
+        if self.ffmpeg_path:
+            self.dxgi_outputs = probe_dxgi_outputs(self.ffmpeg_path)
 
     # ------------------------------------------------------------ nahrávanie
     def toggle_recording(self) -> None:
@@ -1453,23 +1635,34 @@ class RecorderWindow(QWidget):
                     devices.append(d2)
         return devices
 
-    def _capture_region(self) -> tuple[QRect | None, tuple[int, int]]:
-        """Vráti (oblasť pre gdigrab alebo None = celá plocha, odhad rozmerov)."""
+    def _capture_target(self) -> CaptureTarget:
+        """Čo a ako zachytávať – vyberie aj najrýchlejšiu dostupnú metódu."""
+        region: QRect | None
+        monitor_idx: int | None = None
         if self.radio_region.isChecked():
             if self.region is None:
                 raise ValueError(tr("Najprv vyber oblasť nahrávania."))
-            return self.region, (self.region.width(), self.region.height())
-        idx = self.monitor_combo.currentData()
-        if idx is None:
+            region = self.region
+        else:
+            idx = self.monitor_combo.currentData()
+            if idx is None:
+                region = None                      # celá pracovná plocha
+            else:
+                monitor_idx = int(idx)
+                r = QRect(self.monitors[monitor_idx].rect)
+                r.setWidth(r.width() - r.width() % 2)
+                r.setHeight(r.height() - r.height() % 2)
+                region = r
+
+        dxgi = [] if self._force_gdi else self.dxgi_outputs
+        target = choose_capture(region, monitor_idx, self.monitors, dxgi)
+        if target.backend == CAPTURE_GDI and target.region is None:
+            # odhad rozmerov celej plochy pre výpočet dátového toku
             union = QRect()
             for m in self.monitors:
                 union = union.united(m.rect)
-            return None, (max(union.width(), 2), max(union.height(), 2))
-        m = self.monitors[idx]
-        r = m.rect
-        r.setWidth(r.width() - r.width() % 2)
-        r.setHeight(r.height() - r.height() % 2)
-        return r, (r.width(), r.height())
+            target.size = (max(union.width(), 2), max(union.height(), 2))
+        return target
 
     def start_recording(self) -> None:
         if self.process is not None:
@@ -1478,7 +1671,7 @@ class RecorderWindow(QWidget):
             QMessageBox.warning(self, APP_NAME, tr("FFmpeg sa nenašiel. Nainštaluj ho alebo zadaj cestu k ffmpeg.exe."))
             return
         try:
-            region, est = self._capture_region()
+            capture = self._capture_target()
         except ValueError as exc:
             QMessageBox.information(self, APP_NAME, str(exc))
             return
@@ -1498,14 +1691,28 @@ class RecorderWindow(QWidget):
 
         args = build_ffmpeg_args(
             fps=int(self.fps_combo.currentData()),
-            region=region,
+            capture=capture,
             cursor=self.cursor_check.isChecked(),
             encoder=str(self.encoder_combo.currentData() or "libx264"),
             quality=str(self.quality_combo.currentData()),
             audio=audio,
             output=self.output_path,
-            est_size=est,
         )
+        self._capture_used = capture
+        self._retry_args = None
+        if capture.backend == CAPTURE_DDA:
+            # keby Desktop Duplication na tomto stroji zlyhala, máme núdzovú cestu
+            fallback = CaptureTarget(CAPTURE_GDI, region=capture.region,
+                                     size=capture.size)
+            self._retry_args = build_ffmpeg_args(
+                fps=int(self.fps_combo.currentData()),
+                capture=fallback,
+                cursor=self.cursor_check.isChecked(),
+                encoder=str(self.encoder_combo.currentData() or "libx264"),
+                quality=str(self.quality_combo.currentData()),
+                audio=audio,
+                output=self.output_path,
+            )
         self._save_settings()
         self.log.clear()
         self._append_log("$ " + subprocess.list2cmdline([self.ffmpeg_path, *args]))
@@ -1533,6 +1740,7 @@ class RecorderWindow(QWidget):
     def _launch(self, args: list[str]) -> None:
         if self.process is None:
             return
+        self._launched_at = datetime.now()
         self.process.start(self.ffmpeg_path, args)
 
     def stop_recording(self) -> None:
@@ -1564,8 +1772,27 @@ class RecorderWindow(QWidget):
             self.process.kill()
 
     # ------------------------------------------------------- proces (sloty)
+    def _restart_with_gdi(self) -> bool:
+        """Desktop Duplication zlyhala hneď po štarte – skúsiť ešte raz cez GDI."""
+        args, self._retry_args = self._retry_args, None
+        if args is None:
+            return False
+        self._force_gdi = True
+        self._append_log(tr("Rýchle zachytávanie zlyhalo, prepínam na GDI."))
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self._on_process_output)
+        self.process.started.connect(self._on_process_started)
+        self.process.errorOccurred.connect(self._on_process_error)
+        self.process.finished.connect(self._on_process_finished)
+        self._stopping = False
+        self._set_recording_ui(True)
+        self._launch(args)
+        return True
+
     def _on_process_started(self) -> None:
         self.started_at = datetime.now()
+        raise_process_priority(int(self.process.processId()) if self.process else 0)
         self.tick.start()
         self._update_status()
         if self.tray.isVisible():
@@ -1592,6 +1819,14 @@ class RecorderWindow(QWidget):
         self._set_recording_ui(False)
         if proc is not None:
             proc.deleteLater()
+
+        # Desktop Duplication spadla hneď po štarte – ticho prejsť na GDI
+        quick = (self._launched_at is not None
+                 and (datetime.now() - self._launched_at).total_seconds() < 5)
+        if (exit_code != 0 and not self._stopping and quick
+                and self._retry_args is not None and self._restart_with_gdi()):
+            return
+        self._retry_args = None
 
         if self._hidden_for_recording:
             self._hidden_for_recording = False
